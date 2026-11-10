@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "addons-forever-core"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "addons-forever-gui"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "addons-forever-core",
  "anyhow",
