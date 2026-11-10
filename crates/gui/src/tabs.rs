@@ -98,7 +98,7 @@ pub fn addons_tab(app: &mut AppGui, ui: &mut egui::Ui) {
                 ui.add_space(6.0);
                 ui.heading("No addons tracked yet");
                 ui.label(
-                    "Point addons-forever at your WoW AddOns folder (Settings), then press Scan. \
+                    "Point addons-forever at your WoW AddOns folder (Settings, then press Save settings), then press Scan. \
                      Manually installed addons are fingerprint-matched to CurseForge, Tukui, GitHub, MMOUI and WowUp Hub.",
                 );
                 ui.add_space(8.0);
@@ -829,7 +829,24 @@ pub fn settings_tab(app: &mut AppGui, ui: &mut egui::Ui) {
                     form.app.addons_dir.as_deref().filter(|d| !d.trim().is_empty()),
                     form.app.auto_detect,
                 ) {
-                    (Some(_), _) => ui.weak("explicit path (used as-is)"),
+                    (Some(d), _) => {
+                        // the field is the draft; say so until it is saved
+                        let applied = cfg_snapshot
+                            .app
+                            .addons_dir
+                            .as_deref()
+                            .map(|p| p.trim())
+                            .unwrap_or("");
+                        let trimmed = d.trim();
+                        if !trimmed.is_empty() && trimmed != applied {
+                            ui.weak(
+                                egui::RichText::new("explicit path - NOT SAVED: press Save settings below")
+                                    .color(tone(ui, Tone::Warn)),
+                            )
+                        } else {
+                            ui.weak("explicit path (used as-is)")
+                        }
+                    }
                     (None, true) => {
                         match addons_forever_core::config::autodetect_addons_dir(form.app.flavor) {
                             Some(p) => {
@@ -1015,7 +1032,14 @@ pub fn settings_tab(app: &mut AppGui, ui: &mut egui::Ui) {
 
 
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(egui::RichText::new("Save settings").strong())).clicked() {
+            // make unsaved state unmistakable: the field previews above are
+            // drafts, not applied settings (the whole config applies on Save)
+            let dirty = form != *cfg_snapshot;
+            let save_label = if dirty { "Save settings - unsaved changes" } else { "Save settings" };
+            let save_text = egui::RichText::new(save_label)
+                .strong()
+                .color(if dirty { tone(ui, Tone::Warn) } else { ui.visuals().strong_text_color() });
+            if ui.add(egui::Button::new(save_text)).clicked() {
                 cmds.push(Cmd::SaveConfig(Box::new(form.clone())));
                 save_msg = Some("Saved to addons-forever.ini.".to_string());
                 save_form = Some(form.clone());

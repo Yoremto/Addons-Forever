@@ -301,7 +301,7 @@ impl Worker {
                     "scan: configured AddOns directory not found: {p} (check [app] addons_dir in the ini; auto-detection is {})",
                     if self.cfg.app.auto_detect { "on (found nothing)" } else { "off" }
                 )),
-                None => self.log("scan: no AddOns directory configured"),
+                None => self.log("scan: no AddOns directory configured (set the AddOns folder in Settings and press Save settings)"),
             }
             let _ = self.ev.send(Ev::ScanDone { matched: 0, unmatched: 0 });
             return;
@@ -324,6 +324,15 @@ impl Worker {
                 scan::apply_scan_report(&mut self.store, &report, &self.cfg);
                 self.save_state();
                 self.log(format!("scan done: {matched} matched, {unmatched} unmanaged"));
+                // common mistake: pointing the app at the game install root
+                // (which has an Interface folder) instead of Interface\AddOns
+                if matched == 0 && dir.join("Interface").is_dir() && (unmatched <= 2) {
+                    self.log(format!(
+                        "hint: {} contains an Interface folder, so it looks like a game install root; the addons live in {}/AddOns",
+                        dir.display(),
+                        dir.join("Interface").display()
+                    ));
+                }
                 let _ = self.ev.send(Ev::ScanDone { matched, unmatched });
             }
             Ok(Err(e)) => {
@@ -533,7 +542,7 @@ impl Worker {
     async fn do_install_new(&mut self, provider: ProviderKind, external_id: String, name: String, channel: Option<Channel>) {
         let reg = Registry::new(&self.ctx);
         let Some(dir) = self.addons_dir() else {
-            self.log("install: no AddOns directory configured");
+            self.log("install: no AddOns directory configured (set it in Settings and press Save settings)");
             return;
         };
         let ev = self.ev.clone();
@@ -782,7 +791,15 @@ impl Worker {
             new_cfg.addons.insert(k, v);
         }
         if let Err(e) = new_cfg.save(path) {
-            let _ = self.ev.send(Ev::Failed { key: "config".into(), msg: format!("Save: {e}") });
+            // a read-only location (Program Files without elevation) is the
+            // classic reason settings never take effect
+            let _ = self.ev.send(Ev::Failed {
+                key: "config".into(),
+                msg: format!(
+                    "Save: {e} - the settings file {} is not writable; move the app folder somewhere writable (e.g. your user profile) or run it once as administrator",
+                    path.display()
+                ),
+            });
             return;
         }
         let old_flavor = self.cfg.app.flavor;
