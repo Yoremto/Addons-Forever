@@ -535,8 +535,13 @@ impl AppGui {
                         for e in entries.iter_mut() {
                             let mut label = e.name.clone();
                             label.push_str(if e.required { "  (required)" } else { "  (optional)" });
-                            if e.source.is_none() {
-                                label.push_str("  -  not found in providers");
+                            match &e.source {
+                                None => label.push_str("  -  not found in providers"),
+                                // name the resolved project: provider ids are
+                                // recycled (a search hit is not a guarantee)
+                                Some((provider, id)) => {
+                                    label.push_str(&format!("  -  {} #{id}", provider.label()))
+                                }
                             }
                             ui.add_enabled_ui(e.source.is_some(), |ui| {
                                 ui.checkbox(&mut e.checked, label);

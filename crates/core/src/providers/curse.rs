@@ -571,6 +571,9 @@ fn remote_file(ctx: &AppCtx, m: &Mod, f: &CurseFile) -> RemoteFile {
         file_name: f.file_name.clone(),
         url: f.download_url.clone().unwrap_or_default(),
         headers,
+        // sortableGameVersions present => the API told us which clients this
+        // file targets; type ids we cannot map mean "not for our clients"
+        flavor_meta: !f.sortable_game_versions.is_empty(),
         flavors,
         date: unix_seconds(&f.file_date),
         size: f.file_length,
@@ -938,10 +941,13 @@ impl Provider for CurseProvider {
         // `page` is 0-based (the API `index` is an offset = page * per_page).
         let index = page.saturating_mul(per);
         let path = "/v1/mods/search";
-        let qs: [(&str, String); 6] = [
+        let qs: [(&str, String); 7] = [
             ("gameId", "1".to_string()),
             ("searchFilter", query.trim().to_string()),
             ("sortField", "2".to_string()), // popularity
+            // the API defaults to ASCENDING, which surfaces zero-download
+            // renames and spam at the top of the result list
+            ("order", "desc".to_string()),
             ("gameVersionTypeId", sel.flavor.curse_type_id().to_string()),
             ("index", index.to_string()),
             ("pageSize", per.to_string()),
@@ -1120,6 +1126,40 @@ mod tests {
         {"id":111,"modId":2382,"isAvailable":false,"displayName":"gone","fileName":"gone.zip","releaseType":2,
          "sortableGameVersions":[]}
       ]}"#;
+
+    #[test]
+    fn index_squatter_files_are_never_installable() {
+        // Live incident (Nov 2026): the Forever search index lists mod 1774863
+        // as "QuestieDB" (a stale name; the project was renamed to a
+        // Supplementaries Squared file). Its files are tagged only with game
+        // version type ids no client maps (73407, 88556 = Minecraft-era), the
+        // flavor-filtered files endpoint returns nothing, and the unfiltered
+        // retry returns them. "Tagged, nothing we know" must mean "incompatible
+        // for us", never "compatible with any".
+        let c = ctx();
+        let m: ModResp = serde_json::from_str(MOD_JSON).expect("mod parses");
+        const SQUAT: &str = r#"{
+          "pagination":{"index":0,"pageSize":50,"resultCount":1,"totalCount":1},
+          "data":[{"id":9386328,"modId":2382,"isAvailable":true,
+                   "displayName":"Supplementaries Squared v1","fileName":"ss.zip","releaseType":1,
+                   "fileDate":"2026-11-01T00:00:00.000Z","fileLength":1,
+                   "downloadUrl":"https://edge.forgecdn.net/files/9386/328/ss.zip",
+                   "sortableGameVersions":[{"gameVersionTypeId":73407,"gameVersion":"26.1"},
+                                           {"gameVersionTypeId":88556,"gameVersion":"26.3"}]}]}"#;
+        let fr: FilesResp = serde_json::from_str(SQUAT).expect("files parse");
+        let files: Vec<RemoteFile> = normalize_files(fr.data)
+            .into_iter()
+            .map(|f| remote_file(&c, &m.data, &f))
+            .collect();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].flavors.is_empty(), "unmapped type ids drop out");
+        assert!(files[0].flavor_meta, "tagged by the API: not compatible-any");
+        let meta = meta_shell(&m.data, files);
+        assert!(
+            crate::types::pick_generic(&meta, &sel()).is_none(),
+            "a file tagged for foreign clients must never be picked"
+        );
+    }
 
     #[test]
     fn meta_and_files_fixture() {
@@ -1414,6 +1454,33 @@ mod tests {
         assert_eq!(
             hits.iter().find(|h| h.mod_id == 2382).unwrap().folders,
             vec!["BigWigs".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "live CurseForge API (FA_LIVE=1)"]
+    async fn live_forever_index_squatter_never_picks() {
+        // Curse mod 1774863 appears in the Forever search index as "QuestieDB"
+        // (stale name from before a renames-as-recycling spam wave; the real
+        // project is a supplement file tagged only for unmapped game version
+        // ids). An install resolved to it must refuse: no compatible file.
+        if !live() {
+            return;
+        }
+        let c = ctx();
+        let s = CurseProvider::new();
+        let metas = s
+            .meta(&c, &["1774863".into()])
+            .await
+            .expect("meta ok (may be an empty file list)");
+        let meta = metas.into_iter().next().expect("one meta");
+        assert!(
+            crate::types::pick_generic(&meta, &sel()).is_none(),
+            "squatter files (unmapped flavor tags) must not be picked: {:?}",
+            meta.files
+                .iter()
+                .map(|f| (&f.file_id, &f.flavors, f.flavor_meta))
+                .collect::<Vec<_>>()
         );
     }
 }

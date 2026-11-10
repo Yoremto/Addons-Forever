@@ -304,6 +304,7 @@ pub fn release_files(
             file_name: asset.name.clone(),
             url,
             headers,
+            flavor_meta: !flavors.is_empty(),
             flavors,
             date,
             size: asset.size,

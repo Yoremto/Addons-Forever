@@ -177,11 +177,17 @@ pub async fn resolve_source(ctx: &AppCtx, reg: &Registry, sel: &FileSelect, name
         let Ok(page) = reg.get(provider).search(ctx, name, 0, 25, sel).await else {
             continue;
         };
-        if let Some(item) = page
+        // Exact-name search hits are not ranked by the API (provider order can
+        // put a renamed, low-download squatter of the same name first; live
+        // case: "QuestieDB" returned a 54k-download rename ahead of the real
+        // 6.4M-download project). Prefer the most-downloaded exact match.
+        let mut hits: Vec<_> = page
             .items
             .into_iter()
-            .find(|i| clean_name(&i.name).eq_ignore_ascii_case(&clean_name(name)))
-        {
+            .filter(|i| clean_name(&i.name).eq_ignore_ascii_case(&clean_name(name)))
+            .collect();
+        hits.sort_by_key(|i| std::cmp::Reverse(i.downloads.unwrap_or(0)));
+        if let Some(item) = hits.into_iter().next() {
             return Some((item.provider, item.external_id));
         }
     }
@@ -338,6 +344,17 @@ mod tests {
             // flavor (gameVersionTypeId 88568), so the exact-name search hits.
             let src = resolve_source(&ctx, &reg, &sel, "AishCore").await;
             assert!(src.is_some(), "AishCore must resolve on the forever flavor");
+            // Live incident (Nov 2026): the Forever search index lists a
+            // 54k-download renamed squatter named "QuestieDB" (1774863, a
+            // supplement file tagged only for unmapped game versions) ahead
+            // of the real 6.4M-download QuestieDB (1696795). Exact-name
+            // resolution must pick the real project, never the squatter.
+            let src = resolve_source(&ctx, &reg, &sel, "QuestieDB").await;
+            assert_eq!(
+                src,
+                Some((crate::types::ProviderKind::Curse, "1696795".to_string())),
+                "QuestieDB must resolve to the real project, not the index squatter"
+            );
             // a made-up addon resolves to nothing
             let src = resolve_source(&ctx, &reg, &sel, "Zzznotarealaddon918273645").await;
             assert!(src.is_none(), "bogus name must not resolve");

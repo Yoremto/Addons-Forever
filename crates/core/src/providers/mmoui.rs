@@ -198,6 +198,7 @@ fn remote_file(
         url: url.to_string(),
         headers: Default::default(),
         flavors: Vec::new(), // the API publishes no flavor info
+        flavor_meta: false,
         date,
         size: None,
         md5: non_empty(md5),

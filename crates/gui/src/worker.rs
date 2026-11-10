@@ -470,11 +470,16 @@ impl Worker {
         let sel = self.sel(self.cfg.updates.channel);
         for dep in &mut unmet {
             dep.source = deps::resolve_source(&self.ctx, &reg, &sel, &dep.name).await;
-            self.log(format!(
-                "dependency of {addon_name}: {} ({})",
-                dep.name,
-                if dep.source.is_some() { "found" } else { "not found in providers" }
-            ));
+            match &dep.source {
+                Some((provider, id)) => self.log(format!(
+                    "dependency of {addon_name}: {} ({}, resolved to {}#{id})",
+                    dep.name, "found", provider.label()
+                )),
+                None => self.log(format!(
+                    "dependency of {addon_name}: {} (not found in providers)",
+                    dep.name
+                )),
+            }
         }
         let _ = self.ev.send(Ev::DepsFound { addon: addon_name.to_string(), deps: unmet });
     }
@@ -556,6 +561,17 @@ impl Worker {
         let res: Result<(), String> = async {
             let metas = prov.meta(&self.ctx, std::slice::from_ref(&external_id)).await.map_err(|e| e.to_string())?;
             let meta = metas.into_iter().next().ok_or("provider returned no data")?;
+            // Provider records get renamed and recycled (observed on CurseForge:
+            // an addon id found by exact-name search resolving to an unrelated
+            // project). Say so in the log instead of silently installing it.
+            let want = name.trim();
+            let have = meta.name.trim();
+            if !want.is_empty() && !have.is_empty() && !want.eq_ignore_ascii_case(have) {
+                self.log(format!(
+                    "note: {}:{external_id} is published as \"{have}\" (searched as \"{want}\")",
+                    provider.label()
+                ));
+            }
             let file = prov.pick(&meta, &sel).ok_or("no compatible file for this client/channel")?;
             let mut prog = {
                 let ev = ev.clone();
@@ -753,6 +769,15 @@ impl Worker {
                 return;
             }
         }
+        // The search API ignores `order=desc` for popularity sorts and returns
+        // ascending, i.e. zero-download renames and spam first. We fetched all
+        // pages; show the popular projects first.
+        all.sort_by(|a, b| {
+            b.downloads
+                .unwrap_or(0)
+                .cmp(&a.downloads.unwrap_or(0))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
         let _ = self.ev.send(Ev::SearchDone { provider, query, page: 0, items: all, total: total as u32 });
     }
 

@@ -131,9 +131,17 @@ pub struct RemoteFile {
     /// Extra headers required for the download (e.g. CurseForge api key).
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
-    /// Flavors this file declares compatibility with. Empty = unknown/any.
+    /// Flavors this file declares compatibility with. Empty = unknown/any,
+    /// but only when the provider publishes no flavor metadata at all; see
+    /// `flavor_meta`.
     #[serde(default)]
     pub flavors: Vec<Flavor>,
+    /// True when the provider attached flavor metadata to this file, even if
+    /// none of it mapped to a known client (e.g. a Curse file tagged only for
+    /// other game versions). Such a file is never "compatible with any":
+    /// an empty `flavors` list then means "not for this client", not "unknown".
+    #[serde(default)]
+    pub flavor_meta: bool,
     /// Publish date, unix seconds.
     pub date: Option<i64>,
     pub size: Option<u64>,
@@ -317,13 +325,110 @@ pub trait Provider: Send + Sync {
 
 /// Generic file selection: compatible flavor, channel, newest date then highest version.
 pub fn pick_generic(meta: &RemoteMeta, sel: &FileSelect) -> Option<RemoteFile> {
-    meta.files
+    let best = |files: &[&RemoteFile]| -> Option<RemoteFile> {
+        files
+            .iter()
+            .copied()
+            .max_by_key(|f| (f.date.unwrap_or(0), crate::util::version_key(&f.version)))
+            .cloned()
+    };
+    let candidates: Vec<&RemoteFile> = meta
+        .files
         .iter()
         .filter(|f| f.channel <= sel.channel)
-        .filter(|f| f.flavors.is_empty() || f.flavors.contains(&sel.flavor))
-        .max_by_key(|f| (f.date.unwrap_or(0), crate::util::version_key(&f.version)))
-        .cloned()
+        .collect();
+    // an explicit tag for the selected flavor always wins; only then fall
+    // back to files the provider left untagged (GitHub releases without
+    // metadata, plain zips). A file tagged for other clients is never a match.
+    let matched: Vec<&RemoteFile> = candidates
+        .iter()
+        .copied()
+        .filter(|f| f.flavors.contains(&sel.flavor))
+        .collect();
+    if let Some(f) = best(&matched) {
+        return Some(f);
+    }
+    // compatible-any: providers with no flavor metadata at all
+    best(&
+        candidates
+            .into_iter()
+            .filter(|f| f.flavors.is_empty() && !f.flavor_meta)
+            .collect::<Vec<_>>())
 }
 
 /// Parse a loose version string into a comparable numeric key.
 pub use crate::util::version_key;
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    fn rf(id: &str, flavors: &[Flavor], flavor_meta: bool, date: i64) -> RemoteFile {
+        RemoteFile {
+            file_id: id.into(),
+            version: "1.0.0".into(),
+            channel: Channel::Stable,
+            file_name: format!("{id}.zip"),
+            url: format!("https://example.invalid/{id}.zip"),
+            headers: Default::default(),
+            flavors: flavors.to_vec(),
+            flavor_meta,
+            date: Some(date),
+            size: None,
+            md5: None,
+            sha1: None,
+            changelog_url: None,
+        }
+    }
+
+    fn meta_of(files: Vec<RemoteFile>) -> RemoteMeta {
+        RemoteMeta {
+            provider: ProviderKind::Curse,
+            external_id: "1".into(),
+            name: "m".into(),
+            site_url: None,
+            repo_url: None,
+            icon_url: None,
+            author: None,
+            description: None,
+            downloads: None,
+            updated_at: None,
+            files,
+        }
+    }
+
+    fn sel(flavor: Flavor) -> FileSelect {
+        FileSelect {
+            flavor,
+            interface: 16001,
+            version: "1.60.1".into(),
+            channel: Channel::Stable,
+        }
+    }
+
+    #[test]
+    fn tagged_file_never_compatible_any() {
+        // A Curse file tagged only for other clients (all game version type
+        // ids unmapped, so flavors is empty) must not be installed on Forever.
+        let meta = meta_of(vec![rf("mists-other", &[], true, 100)]);
+        assert!(pick_generic(&meta, &sel(Flavor::Forever)).is_none());
+    }
+
+    #[test]
+    fn untagged_provider_files_stay_compatible_any() {
+        // GitHub releases and plain zips publish no flavor metadata: they must
+        // keep installing (the catchall is their only path).
+        let meta = meta_of(vec![rf("zip-1", &[], false, 100)]);
+        assert_eq!(pick_generic(&meta, &sel(Flavor::Forever)).unwrap().file_id, "zip-1");
+    }
+
+    #[test]
+    fn flavor_match_beats_foreign_tags_and_untagged() {
+        let meta = meta_of(vec![
+            rf("foreign", &[Flavor::Mists], true, 300),
+            rf("untagged", &[], false, 200),
+            rf("forever", &[Flavor::Forever], true, 100),
+        ]);
+        assert_eq!(pick_generic(&meta, &sel(Flavor::Forever)).unwrap().file_id, "forever");
+    }
+}

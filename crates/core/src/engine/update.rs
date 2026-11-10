@@ -438,6 +438,7 @@ mod tests {
             url: format!("https://example.invalid/{id}.zip"),
             headers: Default::default(),
             flavors: vec![],
+            flavor_meta: false,
             date: Some(date),
             size: None,
             md5: None,

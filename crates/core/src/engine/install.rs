@@ -686,6 +686,7 @@ mod tests {
             url: "https://example.invalid/test-addon.zip".into(),
             headers: BTreeMap::new(),
             flavors: vec![],
+            flavor_meta: false,
             date: Some(1_700_000_000),
             size: Some(bytes.len() as u64),
             md5: Some(hex_md5(bytes)),

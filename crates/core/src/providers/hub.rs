@@ -350,6 +350,7 @@ pub(crate) fn build_files(releases: &[HubRelease]) -> Vec<RemoteFile> {
             file_name: nonempty(r.name.as_ref()).unwrap_or_else(|| url_file_name(&url)),
             url,
             headers: Default::default(),
+            flavor_meta: !flavors.is_empty(),
             flavors,
             date: r.published_at.as_deref().and_then(parse_iso),
             size: None,

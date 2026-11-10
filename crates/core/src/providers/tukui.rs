@@ -132,6 +132,7 @@ fn remote_file(a: &TukuiAddon) -> RemoteFile {
         url: a.url.clone(),
         headers: Default::default(),
         flavors: flavors_from_patches(&a.patch),
+        flavor_meta: !a.patch.is_empty(),
         date: last_update_seconds(&a.last_update),
         size: None,
         md5: None,

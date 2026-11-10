@@ -81,6 +81,7 @@ pub fn build_file(
         url: url.trim().to_string(),
         headers: Default::default(),
         flavors: Vec::new(),
+        flavor_meta: false,
         date,
         size: len,
         md5: None,
