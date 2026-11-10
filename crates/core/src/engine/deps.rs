@@ -174,15 +174,29 @@ pub async fn resolve_source(ctx: &AppCtx, reg: &Registry, sel: &FileSelect, name
         ProviderKind::Tukui,
         ProviderKind::WowInterface,
     ] {
-        let Ok(page) = reg.get(provider).search(ctx, name, 0, 25, sel).await else {
-            continue;
-        };
+        // Collect all result pages (the popularity search is served ascending
+        // and ignores `order`, so an exact-name hit can sit on any page).
+        const PER: u32 = 50;
+        const CAP: usize = 500;
+        let mut items: Vec<crate::types::SearchItem> = Vec::new();
+        let mut page_no = 0u32;
+        loop {
+            let Ok(page) = reg.get(provider).search(ctx, name, page_no, PER, sel).await else {
+                break;
+            };
+            let total = page.total as usize;
+            let n = page.items.len();
+            items.extend(page.items);
+            if n == 0 || items.len() >= total.min(CAP) || (items.len() < total && n < PER as usize) {
+                break;
+            }
+            page_no += 1;
+        }
         // Exact-name search hits are not ranked by the API (provider order can
         // put a renamed, low-download squatter of the same name first; live
         // case: "QuestieDB" returned a 54k-download rename ahead of the real
         // 6.4M-download project). Prefer the most-downloaded exact match.
-        let mut hits: Vec<_> = page
-            .items
+        let mut hits: Vec<_> = items
             .into_iter()
             .filter(|i| clean_name(&i.name).eq_ignore_ascii_case(&clean_name(name)))
             .collect();

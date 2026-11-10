@@ -339,6 +339,9 @@ pub(crate) fn build_files(releases: &[HubRelease]) -> Vec<RemoteFile> {
                 }
             }
         }
+        // raw metadata presence, not the mapped result: a release tagged
+        // only for game types we cannot map is foreign, not unknown
+        let tagged = r.game_type.is_some() || !r.game_versions.is_empty();
         files.push(RemoteFile {
             file_id,
             version,
@@ -350,7 +353,7 @@ pub(crate) fn build_files(releases: &[HubRelease]) -> Vec<RemoteFile> {
             file_name: nonempty(r.name.as_ref()).unwrap_or_else(|| url_file_name(&url)),
             url,
             headers: Default::default(),
-            flavor_meta: !flavors.is_empty(),
+            flavor_meta: tagged,
             flavors,
             date: r.published_at.as_deref().and_then(parse_iso),
             size: None,

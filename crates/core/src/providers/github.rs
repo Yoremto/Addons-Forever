@@ -291,7 +291,7 @@ pub fn release_files(
         Channel::Stable
     };
     let date = release_date(rel);
-    let make = |asset: &GhAsset, flavors: Vec<Flavor>| -> RemoteFile {
+    let make = |asset: &GhAsset, flavors: Vec<Flavor>, flavor_meta: bool| -> RemoteFile {
         let (url, accept) = asset_endpoint(repo_id, asset);
         let mut headers = BTreeMap::new();
         if accept == ACCEPT_OCTET {
@@ -304,7 +304,9 @@ pub fn release_files(
             file_name: asset.name.clone(),
             url,
             headers,
-            flavor_meta: !flavors.is_empty(),
+            // raw metadata presence, not the mapped result: a release.json
+            // entry tagged only for unknown flavors is foreign, not unknown
+            flavor_meta,
             flavors,
             date,
             size: asset.size,
@@ -340,7 +342,8 @@ pub fn release_files(
                         }
                     }
                 }
-                out.push(make(asset, flavors));
+                let tagged = !entry.metadata.is_empty();
+                out.push(make(asset, flavors, tagged));
             }
             out
         }
@@ -348,7 +351,11 @@ pub fn release_files(
             .assets
             .iter()
             .filter(|a| is_zip_asset(a) && !is_nolib_name(&a.name))
-            .map(|a| make(a, asset_flavor_tokens(&a.name)))
+            .map(|a| {
+                let flavors = asset_flavor_tokens(&a.name);
+                let tagged = !flavors.is_empty();
+                make(a, flavors, tagged)
+            })
             .collect(),
     }
 }
