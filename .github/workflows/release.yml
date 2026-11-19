@@ -15,13 +15,13 @@ jobs:
             target: x86_64-pc-windows-gnu
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          # dedicated pools: the stock macos-latest queue chronically starves
-          # (jobs get cancelled in-queue); macos-26 is the newest arm64 pool,
-          # macos-15-intel a separate Intel pool
-          - os: macos-26
-            target: aarch64-apple-darwin
+          # the stock macos-latest queues chronically starve (jobs get
+          # cancelled in-queue); macos-15-intel has capacity, and macOS
+          # runners cross-link arm64 against the Xcode SDK natively
           - os: macos-15-intel
             target: x86_64-apple-darwin
+          - os: macos-15-intel
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
