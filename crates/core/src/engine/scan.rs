@@ -209,7 +209,8 @@ pub fn apply_scan_report(store: &mut StateStore, report: &ScanReport, cfg: &AppC
                 installed_version: m
                     .installed_version
                     .clone()
-                    .or_else(|| old.and_then(|o| o.installed_version.clone())),
+                    .or_else(|| old.and_then(|o| o.installed_version.clone()))
+                    .or_else(|| ov.and_then(|o| o.installed_version.clone())),
                 installed_file_id: ov
                     .and_then(|o| o.installed_file_id.clone())
                     .or_else(|| old.and_then(|o| o.installed_file_id.clone())),

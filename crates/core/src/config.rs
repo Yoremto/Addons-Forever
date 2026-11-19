@@ -196,6 +196,10 @@ pub struct AddonOverride {
     /// AF-12: identity (file id) of what is installed, so "same file" is
     /// known across restarts.
     pub installed_file_id: Option<String>,
+    /// Version string of the last installed file. Persisted so the app shows
+    /// its installed addons (with versions) before any scan runs.
+    #[serde(default)]
+    pub installed_version: Option<String>,
 }
 
 impl AppConfig {
@@ -274,6 +278,7 @@ impl AppConfig {
                 kv(&mut s, "pinned", "true");
             }
             kv_opt(&mut s, "installed_file_id", o.installed_file_id.as_deref());
+            kv_opt(&mut s, "installed_version", o.installed_version.as_deref());
             s.push('\n');
         }
         s
@@ -392,6 +397,10 @@ fn cfg_from_ini(ini: &Ini) -> Result<AppConfig> {
         o.pinned = s.get("pinned").map(|v| parse_bool(v, false)).unwrap_or(false);
         o.installed_file_id = s
             .get("installed_file_id")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        o.installed_version = s
+            .get("installed_version")
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
         cfg.addons.insert(key, o);

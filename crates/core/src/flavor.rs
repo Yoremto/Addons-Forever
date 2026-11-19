@@ -75,6 +75,24 @@ impl Flavor {
     }
 
     /// CurseForge `gameVersionTypeId` (authoritative list: /v1/games/1/version-types).
+    /// Map a dotted client version ("1.60.1", "5.5.4", "2.5.6") to its flavor.
+    pub fn from_version(p: &str) -> Option<Flavor> {
+        let mut parts = p.trim().split('.');
+        let major: u32 = parts.next()?.trim().parse().ok()?;
+        let minor: u32 = parts.next().unwrap_or("0").trim().parse().ok()?;
+        Some(match major {
+            1 if minor >= 60 => Flavor::Forever, // 1.60.1, 1.61.x, ...
+            1 => Flavor::ClassicEra,             // 1.13 - 1.15
+            2 => Flavor::Tbc,                    // 2.5.x
+            3 if minor >= 80 => Flavor::Titan,   // 3.80.x
+            3 => Flavor::Wotlk,                  // 3.4.x
+            4 => Flavor::Cata,                   // 4.4.x
+            5 => Flavor::Mists,                  // 5.5.x
+            11..=13 => Flavor::Retail,           // 11.x (Dragonflight), 12.x/13.x (Midnight+)
+            _ => return None,
+        })
+    }
+
     pub fn curse_type_id(self) -> u32 {
         match self {
             Flavor::Forever => 88568,

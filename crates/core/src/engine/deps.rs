@@ -176,33 +176,45 @@ pub async fn resolve_source(ctx: &AppCtx, reg: &Registry, sel: &FileSelect, name
     ] {
         // Collect all result pages (the popularity search is served ascending
         // and ignores `order`, so an exact-name hit can sit on any page).
-        const PER: u32 = 50;
-        const CAP: usize = 500;
-        let mut items: Vec<crate::types::SearchItem> = Vec::new();
-        let mut page_no = 0u32;
-        loop {
-            let Ok(page) = reg.get(provider).search(ctx, name, page_no, PER, sel).await else {
-                break;
-            };
-            let total = page.total as usize;
-            let n = page.items.len();
-            items.extend(page.items);
-            if n == 0 || items.len() >= total.min(CAP) || (items.len() < total && n < PER as usize) {
-                break;
-            }
-            page_no += 1;
+        // Providers index names word-split, so the dependency's folder-style
+        // name ("SpokenReadablesAudio") finds nothing verbatim; camel-case
+        // words ("Spoken Readables Audio") do.
+        let words = camel_words(name);
+        let mut queries: Vec<&str> = vec![name];
+        if !words.is_empty() && !words.eq_ignore_ascii_case(name) {
+            queries.push(&words);
         }
-        // Exact-name search hits are not ranked by the API (provider order can
-        // put a renamed, low-download squatter of the same name first; live
-        // case: "QuestieDB" returned a 54k-download rename ahead of the real
-        // 6.4M-download project). Prefer the most-downloaded exact match.
-        let mut hits: Vec<_> = items
-            .into_iter()
-            .filter(|i| clean_name(&i.name).eq_ignore_ascii_case(&clean_name(name)))
-            .collect();
-        hits.sort_by_key(|i| std::cmp::Reverse(i.downloads.unwrap_or(0)));
-        if let Some(item) = hits.into_iter().next() {
-            return Some((item.provider, item.external_id));
+        for query in queries {
+            let mut items: Vec<crate::types::SearchItem> = Vec::new();
+            let mut page_no = 0u32;
+            loop {
+                let Ok(page) = reg.get(provider).search(ctx, query, page_no, 50, sel).await else {
+                    break;
+                };
+                let total = page.total as usize;
+                let n = page.items.len();
+                items.extend(page.items);
+                let full = n == 0
+                    || items.len() >= total.min(500)
+                    || (items.len() < total && n < 50);
+                if full {
+                    break;
+                }
+                page_no += 1;
+            }
+            // Exact-name search hits are not ranked by the API (provider order
+            // can put a renamed, low-download squatter of the same name first;
+            // live case: "QuestieDB" returned a 54k-download rename ahead of
+            // the real 6.4M-download project). Prefer the most-downloaded
+            // exact match.
+            let mut hits: Vec<_> = items
+                .into_iter()
+                .filter(|i| name_match(&i.name, name))
+                .collect();
+            hits.sort_by_key(|i| std::cmp::Reverse(i.downloads.unwrap_or(0)));
+            if let Some(item) = hits.into_iter().next() {
+                return Some((item.provider, item.external_id));
+            }
         }
     }
     None
@@ -222,6 +234,64 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 
 /// Strip marketing suffixes from provider result names for matching
 /// ("Details! [Ex]" -> "Details!").
+/// Provider project names differ from TOC dependency names by word order and
+/// spacing ("Spoken Audio: Readables" declares as `SpokenReadablesAudio`).
+/// Match on the sorted token multiset as well as the cleaned string.
+fn name_match(a: &str, b: &str) -> bool {
+    let (ca, cb) = (clean_name(a), clean_name(b));
+    if ca.eq_ignore_ascii_case(&cb) {
+        return true;
+    }
+    let (sa, sb) = (name_signature(&ca), name_signature(&cb));
+    !sa.is_empty() && sa == sb
+}
+
+/// "SpokenReadablesAudio" -> "Spoken Readables Audio" (empty if no split).
+fn camel_words(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_lower = false;
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if ch.is_ascii_uppercase() && prev_lower && !out.is_empty() {
+                out.push(' ');
+            }
+            prev_lower = ch.is_ascii_lowercase();
+            out.push(ch);
+        } else {
+            prev_lower = false;
+        }
+    }
+    if out.split_whitespace().count() < 2 {
+        return String::new();
+    }
+    out
+}
+
+/// Lowercase alphanumeric tokens (camelCase split), sorted, deduped.
+fn name_signature(s: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            let lower = ch.to_ascii_lowercase();
+            let starts_word = ch.is_ascii_uppercase()
+                && cur.chars().last().is_some_and(|p| p.is_ascii_lowercase());
+            if starts_word && !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+            cur.push(lower);
+        } else if !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words.sort();
+    words.dedup();
+    words
+}
+
 fn clean_name(s: &str) -> String {
     let mut out = s;
     for c in ['[', '('] {
@@ -317,6 +387,18 @@ mod tests {
     }
 
     #[test]
+    fn name_signature_matches_reordered_words() {
+        // live spoken case: TOC OptionalDeps `SpokenReadablesAudio` is the
+        // CurseForge project "Spoken Audio: Readables"
+        assert!(name_match("Spoken Audio: Readables", "SpokenReadablesAudio"));
+        assert!(name_match("SpokenPlacesAudio", "Spoken Audio: Places"));
+        assert!(name_match("Details! [Ex]", "Details!"));
+        // token multisets must not collide
+        assert!(!name_match("Spoken Audio: Readables", "Spoken Audio: Places"));
+        assert!(!name_match("Questie Classic", "Questie Classic Companion"));
+    }
+
+    #[test]
     fn clean_name_strips_bracket_suffixes() {
         assert_eq!(clean_name("Details! [Ex]"), "Details");
         assert_eq!(clean_name("BigWigs (Classic)"), "BigWigs");
@@ -363,6 +445,15 @@ mod tests {
             // supplement file tagged only for unmapped game versions) ahead
             // of the real 6.4M-download QuestieDB (1696795). Exact-name
             // resolution must pick the real project, never the squatter.
+            // spoken (curse 1700375) declares OptionalDeps by FOLDER name;
+            // the CurseForge projects are worded differently ("Spoken Audio:
+            // Readables"). Token-signature matching must bridge the gap.
+            let src = resolve_source(&ctx, &reg, &sel, "SpokenReadablesAudio").await;
+            assert_eq!(
+                src,
+                Some((crate::types::ProviderKind::Curse, "1701520".to_string())),
+                "the readables audio pack must resolve through the signature match"
+            );
             let src = resolve_source(&ctx, &reg, &sel, "QuestieDB").await;
             assert_eq!(
                 src,

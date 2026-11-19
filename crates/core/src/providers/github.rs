@@ -199,6 +199,28 @@ fn release_date(rel: &GhRelease) -> Option<i64> {
         .or_else(|| rel.created_at.as_deref().and_then(parse_iso))
 }
 
+/// True when a release tag belongs to a stream: `quests-audio/v2.5.0`,
+/// `quests-audio-acted/v0.0.1` (prefix match, segment-aligned), a bare
+/// `quests-audio` tag, or a tag that merely contains the stream word.
+pub fn tag_in_stream(tag: &str, stream: &str) -> bool {
+    let tag = tag.trim();
+    let stream = stream.trim();
+    if tag.is_empty() || stream.is_empty() {
+        return false;
+    }
+    if tag.eq_ignore_ascii_case(stream) {
+        return true;
+    }
+    if tag.len() > stream.len() && tag[..stream.len()].eq_ignore_ascii_case(stream) {
+        // segment-aligned prefix: `quests-audio/v2.5.0`, `quests-audio-acted/v1`
+        return matches!(tag.as_bytes().get(stream.len()), Some(b'/') | Some(b'-') | Some(b':') | Some(b'.'));
+    }
+    // loose fallback: the stream is one hyphen/slash/dot-delimited token
+    tag.to_ascii_lowercase()
+        .split(['/', '-', '.', '_'])
+        .any(|w| w == stream.to_ascii_lowercase())
+}
+
 fn strip_version(tag: &str) -> String {
     let t = tag.trim();
     if t.len() > 1
@@ -533,7 +555,14 @@ impl Provider for GitHubProvider {
         ctx.ensure_online()?;
         let mut out = Vec::new();
         for raw in ids {
-            let Some(repo_id) = parse_repo_id(raw) else {
+            // `owner/repo~stream`: multi-release repos (one product family in
+            // one repo) publish tag-per-stream, e.g. spoken-wow's
+            // `quests-audio/v2.5.0`. A stream source only sees its own stream.
+            let (base, stream) = match raw.split_once('~') {
+                Some((b, s)) if !s.trim().is_empty() => (b, Some(s.trim().to_string())),
+                _ => (raw.as_str(), None),
+            };
+            let Some(repo_id) = parse_repo_id(base) else {
                 warn!(target: "fa::github", "skipping unparseable repo id {raw:?}");
                 continue;
             };
@@ -547,8 +576,8 @@ impl Provider for GitHubProvider {
                     continue;
                 }
             };
-            let rels: Vec<GhRelease> =
-                match gh_json(ctx, &format!("{API}/repos/{repo_id}/releases?per_page=10")).await {
+            let rels: Vec<GhRelease> = match &stream {
+                None => match gh_json(ctx, &format!("{API}/repos/{repo_id}/releases?per_page=10")).await {
                     Ok(r) => r,
                     Err(e) => {
                         if is_rate_limit(&e) {
@@ -557,7 +586,35 @@ impl Provider for GitHubProvider {
                         warn!(target: "fa::github", "releases of {repo_id}: {e}");
                         Vec::new()
                     }
-                };
+                },
+                Some(s) => {
+                    // releases arrive newest first; collect this stream's tags
+                    let mut found: Vec<GhRelease> = Vec::new();
+                    for page in 1..=5u32 {
+                        let rels: Vec<GhRelease> = match gh_json(
+                            ctx,
+                            &format!("{API}/repos/{repo_id}/releases?per_page=100&page={page}"),
+                        )
+                        .await
+                        {
+                            Ok(r) => r,
+                            Err(e) => {
+                                if is_rate_limit(&e) {
+                                    return Err(e);
+                                }
+                                warn!(target: "fa::github", "releases of {repo_id}: {e}");
+                                break;
+                            }
+                        };
+                        let n = rels.len();
+                        found.extend(rels.into_iter().filter(|r| tag_in_stream(&r.tag_name, s)));
+                        if found.len() >= 10 || n < 100 {
+                            break;
+                        }
+                    }
+                    found.into_iter().take(10).collect()
+                }
+            };
             let mut items: Vec<(GhRelease, Option<ReleaseJson>)> = Vec::new();
             for rel in select_releases(rels) {
                 let rj = match fetch_release_json(ctx, &repo_id, &rel).await {
@@ -572,7 +629,12 @@ impl Provider for GitHubProvider {
                 };
                 items.push((rel, rj));
             }
-            out.push(build_meta(&repo_id, &repo, &items));
+            let mut meta = build_meta(&repo_id, &repo, &items);
+            meta.external_id = raw.clone();
+            if let Some(s) = &stream {
+                meta.name = format!("{} ({s})", meta.name);
+            }
+            out.push(meta);
         }
         Ok(out)
     }
@@ -1029,6 +1091,35 @@ mod tests {
             cfg: std::sync::Arc::new(crate::config::AppConfig::default()),
             app_version: "test",
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "live GitHub API (FA_LIVE=1)"]
+    async fn live_stream_release_filter() {
+        // rusty-key/spoken-wow publishes one tag namespace per product stream;
+        // the stream source must see only its stream's releases.
+        if std::env::var("FA_LIVE").map(|v| v != "1").unwrap_or(true) {
+            return;
+        }
+        let c = live_ctx();
+        let g = GitHubProvider::new();
+        let metas = g
+            .meta(&c, &["rusty-key/spoken-wow~quests-audio".to_string()])
+            .await
+            .expect("stream meta");
+        let meta = metas.into_iter().next().expect("one meta");
+        assert_eq!(meta.external_id, "rusty-key/spoken-wow~quests-audio");
+        let f = crate::types::pick_generic(&meta, &crate::types::FileSelect::from_cfg(&c.cfg))
+            .expect("audio zip is untagged, installable");
+        assert_eq!(f.file_name, "SpokenQuestsAudioAll-2.5.0.zip", "files: {:?}", meta.files.iter().map(|x| &x.file_name).collect::<Vec<_>>());
+        // core stream sees the core zip, not audio
+        let metas = g
+            .meta(&c, &["rusty-key/spoken-wow~spoken".to_string()])
+            .await
+            .expect("core meta");
+        let meta = metas.into_iter().next().expect("one meta");
+        let f = crate::types::pick_generic(&meta, &crate::types::FileSelect::from_cfg(&c.cfg)).expect("core zip");
+        assert!(f.file_name.starts_with("Spoken-"), "got {}", f.file_name);
     }
 
     #[tokio::test]

@@ -540,7 +540,12 @@ fn remote_file(ctx: &AppCtx, m: &Mod, f: &CurseFile) -> RemoteFile {
     let mut flavors: Vec<Flavor> = f
         .sortable_game_versions
         .iter()
-        .filter_map(|g| flavor_of_type_id(g.game_version_type_id))
+        .filter_map(|g| {
+            flavor_of_type_id(g.game_version_type_id)
+                // Curse sends version strings with type ids for live clients
+                // and omits the id for some legacy feeds; map the version
+            .or_else(|| Flavor::from_version(&g.game_version))
+        })
         .collect();
     flavors.sort_by_key(|f| {
         Flavor::ALL

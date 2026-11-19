@@ -101,6 +101,8 @@ pub struct AppGui {
     pub discover: DiscoverState,
     pub changelog: Option<ChangelogView>,
     pub dep_dialog: Option<DepDialog>,
+    /// "clipboard unavailable" hint after a failed Paste button press
+    pub paste_note: Option<String>,
     pub confirm_uninstall: Option<(String, String)>, // key, name
     pub source_editor: Option<SourceEditor>,
     pub settings_form: Option<Box<AppConfig>>,
@@ -168,6 +170,7 @@ impl AppGui {
             discover: DiscoverState::default(),
             changelog: None,
             dep_dialog: None,
+            paste_note: None,
             confirm_uninstall: None,
             source_editor: None,
             settings_form: None,

@@ -13,14 +13,16 @@ use crate::toc;
 use crate::types::{AppCtx, ProviderKind, RemoteFile, RemoteMeta};
 use crate::store::AddonState;
 
-/// Hard cap for downloaded archives (addon zips are tiny; guards zip bombs).
-pub const MAX_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
+/// Hard cap for downloaded archives. Voice-pack addons (e.g. spoken's audio
+/// releases on CurseForge) legitimately ship archives of 0.5-2 GiB; the cap
+/// stays far above that so it only ever bounds abusive servers.
+pub const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Cap for a single unpacked entry.
-const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ENTRY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Cap for the total unpacked size.
-const MAX_UNPACKED_TOTAL: u128 = 2 * 1024 * 1024 * 1024;
+const MAX_UNPACKED_TOTAL: u128 = 8 * 1024 * 1024 * 1024;
 /// Cap for the number of archive entries (inode/CPU exhaustion guard).
-const MAX_ENTRIES: usize = 20_000;
+const MAX_ENTRIES: usize = 100_000;
 
 /// Install progress notifications.
 #[derive(Clone, Debug, PartialEq)]
@@ -386,7 +388,7 @@ fn snapshot_dir(tmp: &Path, key: &str) -> PathBuf {
 }
 
 /// Download an archive into the `.fa-tmp` scratch dir and return its bytes
-/// (allowlist enforced by net, 200 MiB cap, provider headers attached).
+/// (allowlist enforced by net, 2 GiB cap, provider headers attached).
 pub(crate) async fn download_zip(
     ctx: &AppCtx,
     addons_dir: &Path,
@@ -412,7 +414,7 @@ pub(crate) async fn download_zip(
     }
     // pre-flight: a provider-announced size over the cap never starts
     if file.size.is_some_and(|s| s > MAX_DOWNLOAD_BYTES) {
-        return Err(Error::provider("install", "download exceeds the 200 MiB cap"));
+        return Err(Error::provider("install", "download exceeds the 2 GiB cap"));
     }
 
     let downloaded = net::download_to(

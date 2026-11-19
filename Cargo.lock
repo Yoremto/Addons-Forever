@@ -48,6 +48,7 @@ version = "0.3.7"
 dependencies = [
  "addons-forever-core",
  "anyhow",
+ "arboard",
  "chrono",
  "dirs",
  "eframe",

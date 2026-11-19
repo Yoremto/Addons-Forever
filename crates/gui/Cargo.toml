@@ -20,6 +20,7 @@ eframe = { version = "0.37", default-features = false, features = [
 ] }
 egui_extras = { version = "0.37", features = ["image"] }
 egui = "0.37"
+arboard = "3"
 addons-forever-core = { path = "../core" }
 interprocess = "2"
 open = "5"

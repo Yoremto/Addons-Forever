@@ -32,7 +32,7 @@ pub const ALLOWED_HOSTS: &[&str] = &[
 
 /// Largest initial allocation the downloader will ever reserve (the real
 /// bound is enforced per received byte while streaming).
-const MAX_ALLOC_PREFLIGHT: u64 = 512 * 1024 * 1024;
+const MAX_ALLOC_PREFLIGHT: u64 = 4 * 1024 * 1024 * 1024;
 
 pub fn host_allowed(url: &str) -> bool {
     let Some(host) = https_host(url) else {

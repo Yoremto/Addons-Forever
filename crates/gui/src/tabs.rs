@@ -401,62 +401,105 @@ fn est_text_w(ui: &egui::Ui, text: &str, small: bool, strong: bool) -> f32 {
 /// Cell padding budget around measured text (cell margins + a little slack).
 const CELL_PAD: f32 = 14.0;
 
-/// Column widths for `avail` (inclusive of spacing): each column's display
-/// width is at least its measured content width (nothing valuable is
-/// truncated) and grows proportionally to `base` when the window has slack.
-/// When the window is too narrow for content widths, the slack over content
-/// is given up first, and only then do content columns compress toward their
-/// `min` floors. Returns widths and the px-per-base scale for drag mapping.
+/// Column widths for `avail` (inclusive of spacing).
+///
+/// Contract: every column is at least its content floor (measured text) and
+/// its hard minimum, the widths always sum to exactly the available inner
+/// width, and the user's `base` drives the result proportionally - a resize
+/// that grows one column visibly takes px from the others (see
+/// [`apply_boundary_drag`]). Returns widths and the px-per-base scale for
+/// drag mapping.
 fn fit_widths(base: &[f32], content: &[f32], min: &[f32], avail: f32, spacing: f32) -> (Vec<f32>, f32) {
     let n = base.len().max(1);
     let inner = (avail - spacing * (n - 1) as f32).max(40.0 * n as f32);
-    let want: Vec<f32> = base.iter().zip(content).map(|(b, c)| b.max(*c)).collect();
-    let sum_want: f32 = want.iter().sum::<f32>().max(1.0);
     let sum_base: f32 = base.iter().sum::<f32>().max(1.0);
     let scale = inner / sum_base;
-    let deficit = sum_want - inner;
-    let w = if deficit <= 0.0 {
-        want.iter().map(|x| x * inner / sum_want).collect()
-    } else {
-        // slack first: shrink above the content floor, proportionally
-        let slack: Vec<f32> = want.iter().zip(content).map(|(w, c)| (w - c).max(0.0)).collect();
-        let sum_slack: f32 = slack.iter().sum();
-        if sum_slack > deficit {
-            want.iter().zip(&slack).map(|(w, s)| w - deficit * s / sum_slack).collect()
-        } else {
-            // then compress content toward the hard minimum, proportionally
-            let room: Vec<f32> =
-                want.iter().zip(min).map(|(w, m)| (w.max(*m) - m).max(0.0)).collect();
-            let sum_room: f32 = room.iter().sum::<f32>().max(1.0);
-            let extra = deficit - sum_slack;
-            want.iter().zip(&room).zip(min)
-                .map(|((w, r), m)| (w - extra * r / sum_room).max(*m))
-                .collect()
+    // display-px targets: user wish, content floor, hard minimum
+    let mut w: Vec<f32> = (0..n)
+        .map(|i| {
+            let floor = content.get(i).copied().unwrap_or(0.0);
+            let hard = min.get(i).copied().unwrap_or(40.0);
+            (base[i] * scale).max(floor).max(hard)
+        })
+        .collect();
+    let sum_w: f32 = w.iter().sum::<f32>().max(1.0);
+    if sum_w <= inner {
+        // surplus: share it proportionally to the user's wishes
+        let surplus = inner - sum_w;
+        for (wi, b) in w.iter_mut().zip(base) {
+            *wi += surplus * b / sum_base;
         }
-    };
+    } else {
+        // over budget: give up the user's slack above the content floor
+        // first, and only then compress content toward the hard minimums
+        let floors: Vec<f32> = (0..n)
+            .map(|i| {
+                content
+                    .get(i)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .max(min.get(i).copied().unwrap_or(40.0))
+            })
+            .collect();
+        let slack: Vec<f32> = (0..n).map(|i| (w[i] - floors[i]).max(0.0)).collect();
+        let sum_slack: f32 = slack.iter().sum::<f32>().max(0.0);
+        let over = sum_w - inner;
+        if sum_slack >= over {
+            for i in 0..n {
+                w[i] -= over * slack[i] / sum_slack.max(1.0);
+            }
+        } else {
+            let room: Vec<f32> = (0..n)
+                .map(|i| (w[i] - floors[i]).max(0.0) + (floors[i] - min.get(i).copied().unwrap_or(40.0)).max(0.0))
+                .collect();
+            let sum_room: f32 = room.iter().sum::<f32>().max(1.0);
+            let extra = over - sum_slack;
+            for i in 0..n {
+                w[i] = (w[i] - sum_slack * slack[i] / sum_slack.max(1.0) - extra * room[i] / sum_room)
+                    .max(min.get(i).copied().unwrap_or(40.0));
+            }
+        }
+    }
+    // exact fill: absorb rounding drift in the widest movable column
+    let sum: f32 = w.iter().sum();
+    let drift = inner - sum;
+    if let Some(k) = (0..n).filter(|i| base.get(*i) != base.first()).max_by_key(|i| w[*i] as i32) {
+        w[k] += drift;
+    }
     (w, scale)
 }
 
-/// Move a column boundary by a drag (px): the left column grows, the right
-/// shrinks, clamped so neither goes under its minimum display width.
+/// Move a column boundary by a drag (px): the left column grows and the width
+/// is taken from the OTHER columns, widest first (cascading when one hits its
+/// minimum), so the table's total width stays constant and every column can
+/// always be resized.
 fn apply_boundary_drag(base: &mut [f32], min: &[f32], scale: f32, i: usize, dx: f32) {
-    if scale <= 0.0 || i + 1 >= base.len() {
+    if scale <= 0.0 || i >= base.len() {
         return;
     }
-    let lo = |i: usize| min.get(i).copied().unwrap_or(40.0) / scale;
-    let mut a = base[i] + dx / scale;
-    let mut b = base[i + 1] - dx / scale;
-    if a < lo(i) {
-        b += a - lo(i);
-        a = lo(i);
+    let lo = |j: usize| min.get(j).copied().unwrap_or(40.0) / scale;
+    let target = (base[i] + dx / scale).max(lo(i));
+    let mut need = target - base[i];
+    base[i] = target;
+    if need.abs() < 0.01 {
+        return;
     }
-    if b < lo(i + 1) {
-        a += b - lo(i + 1);
-        b = lo(i + 1);
-        a = a.max(lo(i));
+    // donors: everything else, widest first (stable on equal widths)
+    let mut donors: Vec<usize> = (0..base.len()).filter(|j| *j != i).collect();
+    donors.sort_by(|a, b| base[*b].total_cmp(&base[*a]).then(a.cmp(b)));
+    for j in donors {
+        if need.abs() < 0.01 {
+            break;
+        }
+        // shrinking donors to their floor; expanding them is unbounded
+        let avail = (base[j] - lo(j)).max(0.0);
+        let take = if need > 0.0 { need.min(avail) } else { need };
+        if take == 0.0 {
+            continue;
+        }
+        base[j] -= take;
+        need -= take;
     }
-    base[i] = a;
-    base[i + 1] = b;
 }
 
 /// Header label with a *drawn* sort caret (works with every font).
@@ -520,6 +563,22 @@ fn cap_chars(s: &str, n: usize) -> String {
     }
 }
 
+/// Clipboard read with a retry budget. egui's own Ctrl+V swallows the
+/// keypress silently when the OS clipboard is momentarily held by another
+/// process (clipboard managers, remote desktop agents); this button is the
+/// explicit, visible path and reports failure instead of doing nothing.
+fn clipboard_text() -> Result<String, String> {
+    let mut last = String::from("no clipboard access");
+    for _ in 0..12 {
+        match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+            Ok(text) => return Ok(text),
+            Err(e) => last = e.to_string(),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Err(last)
+}
+
 pub fn discover_tab(app: &mut AppGui, ui: &mut egui::Ui) {
     let mut cmds: Vec<Cmd> = Vec::new();
     let installed: Vec<String> = app.addons.iter().map(|a| a.key.clone()).collect();
@@ -574,6 +633,30 @@ pub fn discover_tab(app: &mut AppGui, ui: &mut egui::Ui) {
                 cmds.push(Cmd::InstallUrl(d.url.trim().to_string()));
             }
         });
+        // the surrounding `d` borrow spans this row: the read is collected
+        // in the closure and applied to app.discover after it
+        let mut paste_res: Option<Result<String, String>> = None;
+        ui.horizontal(|ui| {
+            if ui.button("Paste").clicked() {
+                paste_res = Some(clipboard_text());
+            }
+        });
+        match paste_res {
+            Some(Ok(text)) => {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    app.paste_note = Some("clipboard is empty".into());
+                } else {
+                    d.url.push_str(&text);
+                    app.paste_note = None;
+                }
+            }
+            Some(Err(e)) => app.paste_note = Some(format!("clipboard unavailable: {e}")),
+            None => {}
+        }
+        if let Some(note) = &app.paste_note {
+            ui.weak(egui::RichText::new(note.clone()).color(tone(ui, Tone::Warn)));
+        }
 
         ui.horizontal(|ui| {
             if d.searching {
@@ -642,12 +725,16 @@ pub fn discover_tab(app: &mut AppGui, ui: &mut egui::Ui) {
         }
         let spacing = ui.spacing().item_spacing.x;
         let table_avail = ui.available_width() - DISCOVER_INSTALL_W - spacing;
+        // a single marketing-titled result must not drive every column to
+        // its minimum: cap each content floor at a share of the table width
+        for c in content.iter_mut() {
+            *c = c.min(table_avail * 0.45);
+        }
         let (dw, dscale) = fit_widths(&app.discover_cols, &content, &DISCOVER_MIN, table_avail, spacing);
         let mut ddrag = [0.0f32; 5];
         TableBuilder::new(ui)
             .striped(true)
             .id_salt("discover-table")
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::exact(dw[0]))
             .column(Column::exact(dw[1]))
             .column(Column::exact(dw[2]))
@@ -712,16 +799,16 @@ pub fn discover_tab(app: &mut AppGui, ui: &mut egui::Ui) {
                         ui.add(egui::Label::new(egui::RichText::new(it.author.clone().unwrap_or_default()).small()).truncate().selectable(false));
                     });
                     row.col(|ui| {
-                        ui.weak(fmt_size(it.size.unwrap_or(0)));
+                        ui.add(egui::Label::new(egui::RichText::new(fmt_size(it.size.unwrap_or(0))).weak()).truncate().selectable(false));
                     });
                     row.col(|ui| {
                         if let Some(n) = it.downloads {
-                            ui.weak(fmt_count(n));
+                            ui.add(egui::Label::new(egui::RichText::new(fmt_count(n)).weak()).truncate().selectable(false));
                         }
                     });
                     row.col(|ui| {
                         if let Some(t) = it.updated_at {
-                            ui.weak(fmt_date(t));
+                            ui.add(egui::Label::new(egui::RichText::new(fmt_date(t)).weak()).truncate().selectable(false));
                         }
                     });
                     row.col(|ui| {
@@ -820,6 +907,26 @@ pub fn settings_tab(app: &mut AppGui, ui: &mut egui::Ui) {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         form.app.addons_dir = Some(dir.display().to_string());
                     }
+                }
+                if ui.button("Paste").clicked() {
+                    match clipboard_text() {
+                        Ok(text) => {
+                            let text = text.trim().to_string();
+                            if text.is_empty() {
+                                app.paste_note = Some("clipboard is empty".into());
+                            } else {
+                                form.app.addons_dir = Some(text);
+                                app.paste_note = None;
+                            }
+                        }
+                        Err(e) => app.paste_note = Some(format!("clipboard unavailable: {e}")),
+                    }
+                }
+                if app.paste_note.is_some() && ui.button("dismiss").clicked() {
+                    app.paste_note = None;
+                }
+                if let Some(note) = &app.paste_note {
+                    ui.weak(egui::RichText::new(note.clone()).color(tone(ui, Tone::Warn)));
                 }
                 ui.end_row();
 
@@ -1202,20 +1309,29 @@ mod layout_tests {
     }
 
     #[test]
-    fn boundary_drag_moves_the_separator_and_keeps_mins() {
+    fn boundary_drag_cascades_from_the_widest_and_keeps_mins() {
         let mut base = vec![100.0, 100.0, 100.0];
         let min = vec![40.0, 40.0, 40.0];
         // scale 2: display px = base * 2
         apply_boundary_drag(&mut base, &min, 2.0, 0, 20.0);
         assert_eq!(base[0], 110.0);
-        assert_eq!(base[1], 90.0);
-        // clamp: column 1 cannot go under its 40px minimum (20 base units)
+        assert_eq!(base[1], 90.0); // widest donor (stable: col 1 at equal width)
+        assert_eq!(base[2], 100.0);
+        // a drag wider than one donor: cascade to the next widest (col 2,
+        // then col 1), width conserved, floors respected
         apply_boundary_drag(&mut base, &min, 2.0, 0, 200.0);
-        assert_eq!(base[1], 20.0);
-        assert_eq!(base[0], 180.0); // width conserved: 110 + 90 = 180 + 20
-        // dragging past the neighbor's min stops
+        assert_eq!(base[0], 210.0);
+        assert_eq!(base[2], 20.0); // 100 - (100-20 floor)
+        assert_eq!(base[1], 70.0);
+        assert_eq!(base[0] + base[1] + base[2], 300.0);
+        // dragging past every floor stops at the floors
         apply_boundary_drag(&mut base, &min, 2.0, 0, 500.0);
         assert_eq!(base[1], 20.0);
-        assert_eq!(base[0], 180.0);
+        assert_eq!(base[2], 20.0);
+        assert_eq!(base[0], 460.0); // 210 + (70-20) + (20-20) + ... conserved
+        // shrinking the boundary returns px to the widest donor
+        apply_boundary_drag(&mut base, &min, 2.0, 0, -40.0);
+        assert_eq!(base[0], 440.0);
+        assert_eq!(base[1] + base[2], 60.0);
     }
 }

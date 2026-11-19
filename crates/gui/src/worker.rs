@@ -610,7 +610,9 @@ impl Worker {
                 channel,
                 auto_update: self.cfg.updates.auto_update,
                 ignored: false,
-                manual: provider == ProviderKind::Zip,
+                // zip + explicit GitHub URLs are user-chosen sources: pin them
+                // so a scan cannot rebind the folders to a detected id
+                manual: provider == ProviderKind::Zip || provider == ProviderKind::GitHub,
                 cached_remote: Some(meta.clone()),
                 cached_at: Some(now_unix()),
                 last_checked: Some(now_unix()),
@@ -989,7 +991,9 @@ async fn run(
         let _ = cfg.save(&addons_forever_core::config::AppConfig::config_path(&data_dir));
     }
     let cfg = Arc::new(cfg);
-    let store = StateStore::default();
+    // Installed addons and their sources persist in the ini: start with the
+    // recorded list, then let the scan confirm it against the disk.
+    let store = StateStore::seed_from_cfg(&cfg);
     let (watcher_tx, watcher_rx) = mpsc::unbounded_channel();
     let mut w = Worker {
         ev: ev.clone(),
@@ -1168,6 +1172,43 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+fn stream_from_query(query: &str) -> Option<String> {
+    for pair in query.split('&') {
+        let mut kv = pair.splitn(2, '=');
+        let (k, v) = (kv.next()?, kv.next().unwrap_or(""));
+        if k.eq_ignore_ascii_case("q") && !v.trim().is_empty() {
+            let v = urlencoding(v);
+            if v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Minimal percent decode: stream ids are ASCII tokens, only %20/%3D-style
+/// escapes matter for a pasted search URL.
+fn urlencoding(v: &str) -> String {
+    let b = v.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (
+                (b[i + 1] as char).to_digit(16),
+                (b[i + 2] as char).to_digit(16),
+            ) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).trim().to_string()
+}
+
 /// Parse a user-pasted install target into (provider, external_id, name).
 pub(crate) async fn parse_install_url(ctx: &AppCtx, raw: &str) -> Result<(ProviderKind, String, String), String> {
     let s = raw
@@ -1177,12 +1218,33 @@ pub(crate) async fn parse_install_url(ctx: &AppCtx, raw: &str) -> Result<(Provid
         .trim_start_matches("www.");
 
     // github.com/owner/repo[/...]
+    // stream forms bind to one release series of a multi-release repo:
+    //   .../releases?q=<stream>   (the releases page search link)
+    //   .../releases/tag/<stream>/vX.Y.Z   (a stream-tagged release link)
     if let Some(rest) = s.strip_prefix("github.com/") {
-        let segs: Vec<&str> = rest.split('/').collect();
+        let (path, query) = match rest.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (rest, ""),
+        };
+        let segs: Vec<&str> = path.split('/').collect();
         if segs.len() >= 2 && !segs[0].is_empty() && !segs[1].is_empty() {
             let owner = segs[0].trim_end_matches(".git");
             let repo = segs[1];
-            return Ok((ProviderKind::GitHub, format!("{owner}/{repo}"), repo.to_string()));
+            let mut id = format!("{owner}/{repo}");
+            let mut name = repo.to_string();
+            let stream = stream_from_query(query)
+                .or_else(|| {
+                    segs.iter()
+                        .position(|x| *x == "tag")
+                        .and_then(|i| segs.get(i + 1))
+                        .and_then(|tag| tag.split_once('/').map(|(s, _)| s.to_string()))
+                });
+            if let Some(st) = stream {
+                id.push('~');
+                id.push_str(&st);
+                name = format!("{repo} ({st})");
+            }
+            return Ok((ProviderKind::GitHub, id, name));
         }
         return Err("expected github.com/owner/repo".into());
     }

@@ -105,6 +105,7 @@ impl StateStore {
                 ignored: Some(a.ignored),
                 pinned: a.manual,
                 installed_file_id: a.installed_file_id.clone(),
+                installed_version: a.installed_version.clone(),
             };
             if *e != next {
                 *e = next;
@@ -120,6 +121,52 @@ impl StateStore {
             changed = true;
         }
         changed
+    }
+
+    /// Seed an install list from the config's `[addon ...]` sections: the ini
+    /// records what this app installed (source, folders, version), so the
+    /// addon list is populated at startup before any scan. The scan stays the
+    /// ground truth for folders present on disk; entries whose folders are
+    /// gone are dropped by [`crate::engine::scan::apply_scan_report`] (and
+    /// their sections pruned on the next save).
+    pub fn seed_from_cfg(cfg: &crate::config::AppConfig) -> StateStore {
+        let mut store = StateStore::default();
+        for ov in cfg.addons.values() {
+            let Some(provider) = ov.provider else { continue };
+            let Some(external_id) = ov.external_id.as_deref() else { continue };
+            let external_id = external_id.trim().to_string();
+            if external_id.is_empty() {
+                continue;
+            }
+            let state_key = AddonState::key(provider, &external_id);
+            store.addons.insert(
+                state_key.clone(),
+                AddonState {
+                    key: state_key,
+                    provider,
+                    external_id,
+                    name: ov.name.clone().unwrap_or_default(),
+                    site_url: None,
+                    repo_url: None,
+                    icon_url: None,
+                    folders: ov.folders.clone(),
+                    fingerprints: vec![],
+                    installed_version: ov.installed_version.clone(),
+                    size_bytes: 0,
+                    installed_file_id: ov.installed_file_id.clone(),
+                    channel: ov.channel.unwrap_or(cfg.updates.channel),
+                    auto_update: ov.auto_update.unwrap_or(cfg.updates.auto_update),
+                    ignored: ov.ignored.unwrap_or(false),
+                    manual: ov.pinned,
+                    cached_remote: None,
+                    cached_at: None,
+                    last_checked: None,
+                    provider_data: serde_json::Value::Null,
+                    pending_update: None,
+                },
+            );
+        }
+        store
     }
 
     /// One-time cleanup of the pre-0.2.7 on-disk layout: folds a legacy
