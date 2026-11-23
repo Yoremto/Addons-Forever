@@ -58,6 +58,18 @@ pub fn strip_flavor_suffix(v: &str) -> String {
             }
         }
     }
+    // parenthesized client labels: "OpenMap v0.8.13 (WoW Forever)"
+    if let Some((head, tail)) = out.rsplit_once('(') {
+        let inner = tail.strip_suffix(')');
+        if let Some(inner) = inner {
+            let words: Vec<&str> =
+                inner.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').filter(|w| !w.is_empty()).collect();
+            let is_flavor = |w: &str| w == "wow" || TOKENS.contains(&w);
+            if !words.is_empty() && words.iter().all(|w| is_flavor(w)) {
+                out = head.trim_end().to_string();
+            }
+        }
+    }
     out
 }
 
@@ -65,14 +77,28 @@ pub fn strip_flavor_suffix(v: &str) -> String {
 /// `[(1,""),(0,""),(0,"d")]`, so letter suffixes order (`d` > `c`).
 pub fn version_parts(v: &str) -> Vec<(u64, String)> {
     let mut out = Vec::new();
-    for seg in strip_flavor_suffix(v).split(|c: char| !(c.is_ascii_alphanumeric() && c.is_ascii())) {
+    let mut seen_number = false;
+    for seg in strip_flavor_suffix(v).split(|c: char| !c.is_ascii_alphanumeric()) {
         if seg.is_empty() {
             continue;
         }
-        // strip a leading letter prefix ("v1", "ver2"): version tags, not ordering data
-        let seg = seg.trim_start_matches(|c: char| c.is_ascii_alphabetic());
-        let digits: String = seg.chars().take_while(|c| c.is_ascii_digit()).collect();
-        let letters: String = seg[digits.len()..].to_string();
+        // a leading letter prefix ("v1", "ver2") is a version tag, not
+        // ordering data
+        let num = seg.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+        let digits: String = num.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            // text-only segment: a product-name prefix ("OpenMap v0.8.13")
+            // carries no ordering information and must not shift the
+            // positional comparison; after the first number it is a real
+            // qualifier ("1.0-beta") and orders by name
+            if !seen_number {
+                continue;
+            }
+            out.push((0, seg.to_lowercase()));
+            continue;
+        }
+        seen_number = true;
+        let letters: String = num[digits.len()..].to_lowercase();
         out.push((digits.parse::<u64>().unwrap_or(0), letters));
     }
     out
@@ -144,6 +170,24 @@ mod tests {
         assert!(!version_is_newer("1.0.0c", "1.0.0d"));
         assert_eq!(version_cmp("1.60.28-forever", "1.60.28"), std::cmp::Ordering::Equal);
         assert_eq!(version_cmp("2.0.0b-WOTLK", "2.0.0b"), std::cmp::Ordering::Equal);
+        // product-name prefixes and parenthesized client labels are the real
+        // published version strings on GitHub/CurseForge (OpenMap report:
+        // installed "v0.8.10" vs available "OpenMap v0.8.13 (WoW Forever)"
+        // was judged OLDER by positional segment shift)
+        assert!(version_is_newer("OpenMap v0.8.13 (WoW Forever)", "v0.8.10"));
+        assert!(version_is_newer("OpenMap v0.8.13 (WoW Forever)", "OpenMap v0.8.10 (WoW Forever)"));
+        assert_eq!(
+            version_cmp("OpenMap v0.8.13 (WoW Forever)", "0.8.13"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            version_cmp("OpenMap v0.8.10 (WOTLK)", "OpenMap v0.8.10 (WoW Forever)"),
+            std::cmp::Ordering::Equal,
+            "client labels are identity"
+        );
+        // a qualifier after the numbers still orders
+        assert!(version_is_newer("1.0.0 stable2", "1.0.0 stable1"));
+        assert!(version_is_newer("1.0.1", "1.0.0 beta"));
     }
 
     #[test]

@@ -1147,4 +1147,6 @@ mod tests {
             assert!(picked.is_some());
         }
     }
+
+// ad-hoc debug: appended to github.rs tests by script
 }
