@@ -89,12 +89,15 @@ pub fn version_parts(v: &str) -> Vec<(u64, String)> {
         if digits.is_empty() {
             // text-only segment: a product-name prefix ("OpenMap v0.8.13")
             // carries no ordering information and must not shift the
-            // positional comparison; after the first number it is a real
-            // qualifier ("1.0-beta") and orders by name
+            // positional comparison. Text after a number ("beta", a ".zip"
+            // file-name tail) also carries no ordering information: real
+            // published names use it for file naming, and ordering it
+            // produced false updates on identical versions
+            // ("16001-45" vs "Attune-Forever-v16001-45.zip" regression).
             if !seen_number {
                 continue;
             }
-            out.push((0, seg.to_lowercase()));
+            out.push((0, String::new()));
             continue;
         }
         seen_number = true;
@@ -185,9 +188,13 @@ mod tests {
             std::cmp::Ordering::Equal,
             "client labels are identity"
         );
-        // a qualifier after the numbers still orders
-        assert!(version_is_newer("1.0.0 stable2", "1.0.0 stable1"));
-        assert!(version_is_newer("1.0.1", "1.0.0 beta"));
+        // text qualifiers carry no ordering (file-name tails must not
+        // fabricate updates on identical versions; 0.3.9 regression)
+        assert_eq!(version_cmp("16001-45", "Attune-Forever-v16001-45.zip"), std::cmp::Ordering::Equal);
+        assert_eq!(version_cmp("1.0.12", "Posty_Foreverv1.0.12.zip"), std::cmp::Ordering::Equal);
+        assert_eq!(version_cmp("0.1.178", "MFO 0.1.178 - WoW Forever"), std::cmp::Ordering::Equal);
+        assert_eq!(version_cmp("4.0.22", "AutoCarrotForever-4.0.22.zip"), std::cmp::Ordering::Equal);
+        assert_eq!(version_cmp("1.0.0-beta", "1.0.0"), std::cmp::Ordering::Equal);
     }
 
     #[test]
