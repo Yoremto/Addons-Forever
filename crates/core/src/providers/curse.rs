@@ -460,6 +460,26 @@ fn key_header(ctx: &AppCtx) -> Vec<(String, String)> {
 }
 
 /// Build an API URL with percent-encoded query pairs.
+/// CurseForge's search index splits words on apostrophes and quotes, so a
+/// query typed with them returns nothing (live: "move 'em all" -> 0 results,
+/// "move em all" -> finds "Move 'em All"). Search with the word separators.
+fn sanitize_search(q: &str) -> String {
+    const QUOTES: [char; 8] = ['\'', '\u{2018}', '\u{2019}', '\u{201B}', '`', '\"', '\u{201C}', '\u{201D}'];
+    let cleaned: String = q
+        .chars()
+        .map(|c| if QUOTES.contains(&c) { ' ' } else { c })
+        .collect();
+    // keep the borrow owned only when cleaning changed the words
+    let mut out = String::new();
+    for word in cleaned.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
 fn url(path: &str, query: &[(&str, String)]) -> Result<String> {
     let mut u = reqwest::Url::parse(&format!("{BASE}{path}")).map_err(|e| {
         Error::provider(ProviderKind::Curse.label(), format!("bad url {path}: {e}"))
@@ -948,7 +968,7 @@ impl Provider for CurseProvider {
         let path = "/v1/mods/search";
         let qs: [(&str, String); 7] = [
             ("gameId", "1".to_string()),
-            ("searchFilter", query.trim().to_string()),
+            ("searchFilter", sanitize_search(query)),
             ("sortField", "2".to_string()), // popularity
             // the API defaults to ASCENDING, which surfaces zero-download
             // renames and spam at the top of the result list
@@ -1386,6 +1406,16 @@ mod tests {
     }
 
     #[test]
+    fn search_query_drops_quote_characters() {
+        // live: "move 'em all" returned 0; the index stores "Move 'em All"
+        // as words split at the apostrophe
+        assert_eq!(sanitize_search("move 'em all"), "move em all");
+        assert_eq!(sanitize_search("Move \u{2019}em All"), "Move em All");
+        assert_eq!(sanitize_search("  details!  "), "details!");
+        assert_eq!(sanitize_search("\"big\"wigs`"), "big wigs");
+    }
+
+    #[test]
     fn url_building_encodes_query() {
         let u = url(
             "/v1/mods/search",
@@ -1459,6 +1489,25 @@ mod tests {
         assert_eq!(
             hits.iter().find(|h| h.mod_id == 2382).unwrap().folders,
             vec!["BigWigs".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "live CurseForge API (FA_LIVE=1)"]
+    async fn live_apostrophe_query_finds_the_mod() {
+        if !live() {
+            return;
+        }
+        let c = ctx();
+        let s = CurseProvider::new();
+        let page = s
+            .search(&c, "move 'em all", 0, 25, &sel())
+            .await
+            .expect("search ok");
+        assert!(
+            page.items.iter().any(|i| i.external_id == "860446"),
+            "\"Move 'em All\" (860446) must be found with the apostrophe              in the query, got {:?}",
+            page.items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>()
         );
     }
 
